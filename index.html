@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nemo Drop - Deorbit Simulator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #0b0f19; color: #f3f4f6; font-family: system-ui, sans-serif; }
+        canvas { background: radial-gradient(circle, #111827 0%, #030712 100%); }
+    </style>
+</head>
+<body class="flex flex-col lg:flex-row h-screen w-screen overflow-hidden p-4 gap-4">
+
+    <div class="w-full lg:w-80 flex flex-col gap-4 bg-gray-900 bg-opacity-80 backdrop-blur border border-gray-800 rounded-xl p-5 shadow-2xl overflow-y-auto shrink-0">
+        <div>
+            <h1 class="text-xl font-bold text-blue-400 flex items-center gap-2">
+                🚀 Nemo Drop
+            </h1>
+            <p class="text-xs text-gray-400 mt-1">인공위성 낙하 시뮬레이터</p>
+        </div>
+        
+        <hr class="border-gray-800">
+
+        <div>
+            <label class="block text-sm font-semibold text-gray-300 mb-2">1. 타깃 위성 선택</label>
+            <select id="satSelect" class="w-full bg-gray-800 border border-gray-700 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-blue-500">
+                <option value="sputnik">스푸트니크 1호 (Sputnik 1) - 초급</option>
+                <option value="mir">미르 우주정거장 (Mir) - 중급</option>
+                <option value="iss">국제우주정거장 (ISS) - 상급</option>
+            </select>
+        </div>
+
+        <div class="bg-gray-950 rounded-lg p-3 border border-gray-800 text-xs flex flex-col gap-1.5">
+            <div class="flex justify-between"><span class="text-gray-400">초기 궤도 (대기권 기준):</span><span id="specAlt" class="font-mono text-purple-400">-</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">초기 질량 (m₀):</span><span id="specMass" class="font-mono text-blue-300">-</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">투영 단면적 (A):</span><span id="specArea" class="font-mono text-blue-300">-</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">항력 계수 (Cd):</span><span id="specCd" class="font-mono text-blue-300">-</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">구동 수명 (τ_life):</span><span id="specLife" class="font-mono text-blue-300">-</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">파편화 계수 (k_break):</span><span id="specK" class="font-mono text-emerald-400">-</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">기동 시작 각도 (rad):</span><span id="specBurnTheta" class="font-mono text-orange-400">-</span></div>
+        </div>
+
+        <div>
+            <div class="flex justify-between text-sm font-semibold text-gray-300 mb-1">
+                <label>2. 역추진 감속량 (Δv)</label>
+                <span id="dvValue" class="text-blue-400 font-mono font-bold">150 m/s</span>
+            </div>
