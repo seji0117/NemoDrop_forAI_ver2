@@ -141,6 +141,10 @@
             let firstAtmosphereIn = true;
             let isTimeoutFail = false;
 
+            // 추가: 고속 역산을 위한 궤적 추적 변수
+            let userTotalAngle = 0;
+            let prevSimTheta = 0;
+
             // ★ 렌더링용 변환 함수: 물리적 거리(r)를 캔버스 픽셀(시각적 스케일)로 변환
             function getVisR(physicalR) {
                 let h = physicalR - Re; // 지표면으로부터의 물리적 고도
@@ -298,6 +302,10 @@
                             let vMag = Math.sqrt(vx*vx + vy*vy);
                             vx = (vx / vMag) * (vMag - dv);
                             vy = (vy / vMag) * (vMag - dv);
+                            
+                            // 역산을 위한 궤적 추적 초기화
+                            prevSimTheta = currentSat.burnTheta;
+                            userTotalAngle = 0;
                         }
                     } 
                     else if (simState === "DEORBIT" || simState === "ATMOSPHERE") {
@@ -352,6 +360,15 @@
                         vy += ay * dt;
                         px += vx * dt;
                         py += vy * dt;
+                        
+                        // 역산을 위한 궤적 추적 업데이트
+                        let currentSimTheta = Math.atan2(py, px);
+                        if (currentSimTheta < 0) currentSimTheta += 2 * Math.PI;
+                        let dSimTheta = currentSimTheta - prevSimTheta;
+                        if (dSimTheta < -Math.PI) dSimTheta += 2 * Math.PI;
+                        if (dSimTheta > Math.PI) dSimTheta -= 2 * Math.PI;
+                        userTotalAngle += dSimTheta;
+                        prevSimTheta = currentSimTheta;
                     }
                 }
 
@@ -383,30 +400,159 @@
                     resultOverlay.classList.add('opacity-100', 'scale-100');
                 }, 50);
 
+                let baseText = "";
+
                 if (isTimeoutFail) {
                     resultTitle.innerText = "MISSION FAIL 💥";
                     resultTitle.className = "text-5xl font-black tracking-wider text-red-500";
-                    resultDesc.innerText = "인공위성 낙하 실패! 역추진 기동 후 일정 시간이 지났지만 낙하하지 못했습니다! 감속량(Δv)이 너무 낮아 대기권 재진입에 실패했습니다.";
-                    return;
+                    baseText = "인공위성 낙하 실패! 역추진 기동 후 일정 시간이 지났지만 낙하하지 못했습니다! 감속량(Δv)이 너무 낮아 대기권 재진입에 실패했습니다.";
+                } else {
+                    let landingTheta = Math.atan2(py, px);
+                    if (landingTheta < 0) landingTheta += 2 * Math.PI;
+
+                    let angularDiff = Math.abs(landingTheta - thetaNemo);
+                    if (angularDiff > Math.PI) angularDiff = 2 * Math.PI - angularDiff;
+
+                    let totalArcInside = (angularDiff + arcSpanAngle/2 <= nemoHalfAngle);
+
+                    if (totalArcInside) {
+                        resultTitle.innerText = "SUCCESS 🎯";
+                        resultTitle.className = "text-5xl font-black tracking-wider text-emerald-400";
+                        baseText = `인공위성 낙하 성공! ${currentSat.name}의 파편 (${(Lfinal/1000).toFixed(0)}km)이 모두 포인트 니모 범위 안에 들어갔습니다.`;
+                    } else {
+                        resultTitle.innerText = "MISSION FAIL 💥";
+                        resultTitle.className = "text-5xl font-black tracking-wider text-red-500";
+                        baseText = `인공위성 낙하 실패! 대기권에 진입했으나 파편이 포인트 니모 범위를 벗어났습니다. 감속량(Δv)을 조절해 보세요.`;
+                    }
                 }
 
+                // --- 정밀 오차 거리 및 이상적 감속량 역산 로직 ---
                 let landingTheta = Math.atan2(py, px);
                 if (landingTheta < 0) landingTheta += 2 * Math.PI;
-
-                let angularDiff = Math.abs(landingTheta - thetaNemo);
-                if (angularDiff > Math.PI) angularDiff = 2 * Math.PI - angularDiff;
-
-                let totalArcInside = (angularDiff + arcSpanAngle/2 <= nemoHalfAngle);
-
-                if (totalArcInside) {
-                    resultTitle.innerText = "SUCCESS 🎯";
-                    resultTitle.className = "text-5xl font-black tracking-wider text-emerald-400";
-                    resultDesc.innerText = `인공위성 낙하 성공! ${currentSat.name}의 파편 (${(Lfinal/1000).toFixed(0)}km)이 모두 포인트 니모 범위 안에 들어갔습니다.`;
+                
+                let exactAngularDiff = landingTheta - thetaNemo;
+                if (exactAngularDiff < -Math.PI) exactAngularDiff += 2 * Math.PI;
+                if (exactAngularDiff > Math.PI) exactAngularDiff -= 2 * Math.PI;
+                
+                let missDistanceKm = (Math.abs(exactAngularDiff) * Re) / 1000;
+                
+                let targetTotalAngle;
+                if (isTimeoutFail) {
+                    targetTotalAngle = thetaNemo - currentSat.burnTheta;
+                    if (targetTotalAngle <= 0) targetTotalAngle += 2 * Math.PI;
                 } else {
-                    resultTitle.innerText = "MISSION FAIL 💥";
-                    resultTitle.className = "text-5xl font-black tracking-wider text-red-500";
-                    resultDesc.innerText = `인공위성 낙하 실패! 대기권에 진입했으나 파편이 포인트 니모 범위를 벗어났습니다. 감속량(Δv)을 조절해 보세요.`;
+                    targetTotalAngle = userTotalAngle - exactAngularDiff;
+                    if (targetTotalAngle <= 0) targetTotalAngle += 2 * Math.PI;
                 }
+
+                // 백그라운드 고속 무선 시뮬레이션
+                function getTraveledAngle(testDv) {
+                    let t_px = r0 * Math.cos(currentSat.burnTheta);
+                    let t_py = r0 * Math.sin(currentSat.burnTheta);
+                    let t_vx = -v0 * Math.sin(currentSat.burnTheta);
+                    let t_vy = v0 * Math.cos(currentSat.burnTheta);
+                    
+                    let vMag = Math.sqrt(t_vx*t_vx + t_vy*t_vy);
+                    t_vx = (t_vx / vMag) * (vMag - testDv);
+                    t_vy = (t_vy / vMag) * (vMag - testDv);
+                    
+                    let t_dt = 0.5;
+                    let steps = 0;
+                    let max_steps = 20000;
+                    let t_prevTheta = currentSat.burnTheta;
+                    let t_totalAngle = 0;
+                    
+                    while (steps < max_steps) {
+                        let r = Math.sqrt(t_px*t_px + t_py*t_py);
+                        let h = r - Re;
+                        
+                        if (h <= 0) break;
+                        
+                        let ga = mu / (r * r);
+                        let ax = -ga * (t_px / r);
+                        let ay = -ga * (t_py / r);
+                        
+                        if (h <= atmThickness) {
+                            let rho = 1.225 * Math.exp(-h / 7500);
+                            let t_vMag = Math.sqrt(t_vx*t_vx + t_vy*t_vy);
+                            let ad = 0.5 * rho * t_vMag * t_vMag * (currentSat.Cd * currentSat.A) / currentSat.m0;
+                            ax -= ad * (t_vx / t_vMag);
+                            ay -= ad * (t_vy / t_vMag);
+                        }
+                        
+                        t_vx += ax * t_dt;
+                        t_vy += ay * t_dt;
+                        t_px += t_vx * t_dt;
+                        t_py += t_vy * t_dt;
+                        
+                        let currentTheta = Math.atan2(t_py, t_px);
+                        if (currentTheta < 0) currentTheta += 2 * Math.PI;
+                        
+                        let dTheta = currentTheta - t_prevTheta;
+                        if (dTheta < -Math.PI) dTheta += 2 * Math.PI;
+                        if (dTheta > Math.PI) dTheta -= 2 * Math.PI;
+                        
+                        t_totalAngle += dTheta;
+                        t_prevTheta = currentTheta;
+                        steps++;
+                    }
+                    if (steps >= max_steps) return Infinity;
+                    return t_totalAngle;
+                }
+
+                // 이진 탐색으로 최적의 감속량 찾기
+                let low = 1;
+                let high = 2000;
+                let idealDv = dv;
+                
+                for (let i = 0; i < 40; i++) {
+                    let mid = (low + high) / 2;
+                    let ang = getTraveledAngle(mid);
+                    if (ang === Infinity) {
+                        low = mid;
+                    } else {
+                        if (ang > targetTotalAngle) {
+                            low = mid;
+                        } else {
+                            high = mid;
+                        }
+                    }
+                }
+                idealDv = (low + high) / 2;
+
+                let dvDiff = dv - idealDv;
+                let diffText = "";
+                if (Math.abs(dvDiff) < 0.1) {
+                    diffText = `완벽한 감속량입니다! (필요 감속량: <span class="text-emerald-400 font-bold">${idealDv.toFixed(2)} m/s</span>)`;
+                } else if (dvDiff > 0) {
+                    diffText = `필요 감속량(<span class="text-emerald-400 font-bold">${idealDv.toFixed(2)} m/s</span>)보다 <span class="text-red-400 font-bold">${Math.abs(dvDiff).toFixed(2)} m/s 초과</span>됨`;
+                } else {
+                    diffText = `필요 감속량(<span class="text-emerald-400 font-bold">${idealDv.toFixed(2)} m/s</span>)보다 <span class="text-blue-400 font-bold">${Math.abs(dvDiff).toFixed(2)} m/s 부족</span>함`;
+                }
+
+                let extraInfo = "";
+                if (!isTimeoutFail) {
+                    extraInfo = `
+                    <div class="text-xs text-gray-300 bg-gray-900 p-3 rounded-lg border border-gray-700 mt-3 text-left space-y-1.5 w-full shadow-inner">
+                        <div class="font-bold text-gray-400 mb-1 border-b border-gray-800 pb-1 flex items-center gap-1">📊 정밀 타격 데이터</div>
+                        <div class="flex justify-between"><span>니모 중심과의 오차 거리:</span> <span class="text-white font-mono">${missDistanceKm.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 1})} km</span></div>
+                        <div class="flex flex-col gap-1 mt-1 border-t border-gray-800 pt-1">
+                            <span class="text-gray-400">입력 감속량 평가:</span>
+                            <span>${diffText}</span>
+                        </div>
+                    </div>`;
+                } else {
+                    extraInfo = `
+                    <div class="text-xs text-gray-300 bg-gray-900 p-3 rounded-lg border border-gray-700 mt-3 text-left space-y-1.5 w-full shadow-inner">
+                        <div class="font-bold text-gray-400 mb-1 border-b border-gray-800 pb-1 flex items-center gap-1">📊 정밀 타격 데이터</div>
+                        <div class="flex flex-col gap-1">
+                            <span class="text-gray-400">입력 감속량 평가:</span>
+                            <span>${diffText}</span>
+                        </div>
+                    </div>`;
+                }
+
+                resultDesc.innerHTML = baseText + extraInfo;
             }
 
             // 9. 인터페이스 제어
@@ -432,11 +578,13 @@
                 entryGamma = 0; Lfinal = 0; arcSpanAngle = 0;
                 firstAtmosphereIn = true;
                 isTimeoutFail = false;
+                userTotalAngle = 0;
+                prevSimTheta = 0;
                 
                 satSelect.disabled = false;
                 dvInput.disabled = false;
                 startBtn.disabled = false;
-                startBtn.className = "flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-lg transition active:scale-95 cursor-pointer";
+                startBtn.className = "flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-lg transition shadow-lg active:scale-95 cursor-pointer";
                 
                 resultOverlay.classList.remove('opacity-100', 'scale-100');
                 setTimeout(() => { resultOverlay.classList.add('hidden'); }, 300);
