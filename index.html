@@ -46,3 +46,419 @@
                 <label>2. 역추진 감속량 (Δv)</label>
                 <span id="dvValue" class="text-blue-400 font-mono font-bold">150 m/s</span>
             </div>
+            <input type="number" id="dvInput" step="any" value="150" class="w-full bg-gray-800 border border-gray-700 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-blue-500 font-mono">
+        </div>
+
+        <div class="flex gap-2 mt-auto">
+            <button id="startBtn" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-lg transition shadow-lg active:scale-95 cursor-pointer">
+                시작 (Simulation)
+            </button>
+            <button id="resetBtn" class="bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold py-3 px-4 rounded-lg transition active:scale-95 cursor-pointer">
+                리셋
+            </button>
+        </div>
+
+        <div class="bg-gray-950 border border-gray-800 rounded-lg p-3 text-xs flex flex-col gap-1.5 font-mono">
+            <div class="text-gray-400 border-b border-gray-800 pb-1 mb-1 font-sans font-semibold">Live Telemetry</div>
+            <div class="flex justify-between"><span>Phase:</span><span id="telePhase" class="text-yellow-400">-</span></div>
+            <div class="flex justify-between"><span>Altitude:</span><span id="teleAlt">-</span></div>
+            <div class="flex justify-between"><span>Speed:</span><span id="teleSpeed">-</span></div>
+            <div class="flex justify-between"><span>Entry Angle (γ):</span><span id="teleGamma" class="text-orange-400">-</span></div>
+            <div class="flex justify-between"><span>Frag Arc (L_final):</span><span id="teleLfinal" class="text-emerald-400">-</span></div>
+        </div>
+    </div>
+
+    <div class="flex-1 relative bg-gray-950 rounded-xl border border-gray-800 flex items-center justify-center p-2 min-h-[50vh]">
+        <canvas id="simCanvas" width="800" height="800" class="w-full h-full object-contain"></canvas>
+        
+        <div id="resultOverlay" class="absolute inset-0 bg-black bg-opacity-60 backdrop-blur-sm flex flex-col items-center justify-center gap-2 hidden transition-all duration-300 scale-95 opacity-0 rounded-xl">
+            <h2 id="resultTitle" class="text-5xl font-black tracking-wider">SUCCESS</h2>
+            <p id="resultDesc" class="text-sm text-gray-300 max-w-sm text-center mt-2"></p>
+            <button id="overlayResetBtn" class="mt-4 bg-white text-gray-950 font-bold px-6 py-2 rounded-full hover:bg-gray-200 transition active:scale-95 cursor-pointer">
+                다시 시도하기
+            </button>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            
+            // 1. 물리 정수 선언
+            const mu = 3.986e14;
+            const Re = 6378000;
+            const atmThickness = 100000; // 실제 물리적 대기권 두께 (100km 카르만 선)
+            
+            // 시각적 렌더링 스케일 (실제 비율이 아닌 시각적 과장 비율 적용)
+            const visRe = 150; // 캔버스 상 지구 반지름 픽셀
+            const visAtmThickness = visRe / 5; // 조건: 지구 반지름은 그래픽상 대기권 두께의 5배
+            const visAtmBound = visRe + visAtmThickness; // 캔버스 상 대기권 경계
+
+            const Rnemo = 2688000;
+            const thetaNemo = Math.PI / 2;
+            const thetaAntipode = 3 * Math.PI / 2;
+            const nemoHalfAngle = Rnemo / Re;
+
+            // 2. 위성 데이터셋 (h_atm: 대기권으로부터 잰 고도 추가, burnTheta: 역추진 시작 각도 추가)
+            const satellites = {
+                sputnik: { name: "스푸트니크 1호", m0: 83.6, A: 0.26, Cd: 2.1, life: 1, k_break: 5000, h_atm: 477000, burnTheta: 3 * Math.PI / 2 },
+                mir: { name: "미르 우주정거장", m0: 130000, A: 350, Cd: 2.3, life: 2, k_break: 150000, h_atm: 290000, burnTheta: 0 },
+                iss: { name: "국제우주정거장", m0: 450000, A: 2200, Cd: 2.6, life: 3, k_break: 400000, h_atm: 320000, burnTheta: Math.PI / 4 }
+            };
+
+            // 3. UI 요소 매핑
+            const satSelect = document.getElementById('satSelect');
+            const dvInput = document.getElementById('dvInput'); // 변경된 입력창 ID
+            const dvValue = document.getElementById('dvValue');
+            const startBtn = document.getElementById('startBtn');
+            const resetBtn = document.getElementById('resetBtn');
+            const overlayResetBtn = document.getElementById('overlayResetBtn');
+            const resultOverlay = document.getElementById('resultOverlay');
+            const resultTitle = document.getElementById('resultTitle');
+            const resultDesc = document.getElementById('resultDesc');
+
+            const telePhase = document.getElementById('telePhase');
+            const teleAlt = document.getElementById('teleAlt');
+            const teleSpeed = document.getElementById('teleSpeed');
+            const teleGamma = document.getElementById('teleGamma');
+            const teleLfinal = document.getElementById('teleLfinal');
+
+            const canvas = document.getElementById('simCanvas');
+            const ctx = canvas.getContext('2d');
+            const cx = 400, cy = 400; 
+
+            // 4. 시뮬레이션 동적 상태 변수
+            let currentSat;
+            let dv = 150;
+            let r0, v0; // 선택 위성에 따라 가변 적용될 초기 물리량
+            let simState = "IDLE"; 
+            let simTime = 0;
+            let deorbitTime = 0;
+            
+            let px = 0, py = 0, vx = 0, vy = 0;
+            let entryGamma = 0;
+            let Lfinal = 0;
+            let arcSpanAngle = 0;
+            let firstAtmosphereIn = true;
+            let isTimeoutFail = false;
+
+            // ★ 렌더링용 변환 함수: 물리적 거리(r)를 캔버스 픽셀(시각적 스케일)로 변환
+            function getVisR(physicalR) {
+                let h = physicalR - Re; // 지표면으로부터의 물리적 고도
+                if (h <= 0) {
+                    return (physicalR / Re) * visRe; // 지표면 내부
+                } else if (h <= atmThickness) {
+                    // 대기권 내부 구간 (실제 100km -> 시각적 30px)
+                    return visRe + (h / atmThickness) * visAtmThickness;
+                } else {
+                    // 대기권 밖 우주 구간 (최대치인 477,000m를 시각적으로 적절히 분배)
+                    let spaceH = h - atmThickness;
+                    return visAtmBound + (spaceH / 477000) * 120; // 스푸트니크 궤도가 대략 300px 위치에 오도록
+                }
+            }
+
+            // 5. 초기 화면 빌드 및 데이터 갱신
+            function updateSpecs() {
+                let satKey = satSelect.value || "sputnik";
+                currentSat = satellites[satKey];
+                
+                // 선택한 위성에 맞춰 초기 궤도(r0) 및 속도(v0) 동적 할당
+                r0 = Re + atmThickness + currentSat.h_atm;
+                v0 = Math.sqrt(mu / r0);
+                
+                document.getElementById('specAlt').innerText = (currentSat.h_atm / 1000).toLocaleString() + " km";
+                document.getElementById('specMass').innerText = currentSat.m0.toLocaleString() + " kg";
+                document.getElementById('specArea').innerText = currentSat.A + " m²";
+                document.getElementById('specCd').innerText = currentSat.Cd;
+                // 구동 수명 표시를 초에서 '주기(회전)' 단위로 변경
+                document.getElementById('specLife').innerText = currentSat.life + " 주기";
+                document.getElementById('specK').innerText = currentSat.k_break.toLocaleString();
+                document.getElementById('specBurnTheta').innerText = currentSat.burnTheta.toFixed(4);
+                updateInputValue();
+            }
+
+            function updateInputValue() {
+                dv = parseFloat(dvInput.value || 0); // 숫자 입력으로 변경
+                dvValue.innerText = dv + " m/s";
+            }
+
+            satSelect.addEventListener('change', updateSpecs);
+            dvInput.addEventListener('input', updateInputValue);
+
+            // 6. 그리기 코어
+            function drawScene() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // 배경 그리드 망
+                ctx.strokeStyle = 'rgba(31, 41, 55, 0.4)';
+                ctx.lineWidth = 1;
+                for(let r = 100; r <= 350; r += 50) {
+                    ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2*Math.PI); ctx.stroke();
+                }
+
+                // [1. 지구 렌더링 - 물리 연산과 무관하게 지정된 시각적 크기(visRe) 적용]
+                ctx.beginPath();
+                ctx.arc(cx, cy, visRe, 0, 2 * Math.PI);
+                ctx.fillStyle = '#1e293b';
+                ctx.fill();
+                ctx.strokeStyle = '#334155';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // [2. 대기권 렌더링 - 지구의 1/5 두께(visAtmBound)로 시각적 과장]
+                ctx.beginPath();
+                ctx.arc(cx, cy, visAtmBound, 0, 2 * Math.PI);
+                ctx.fillStyle = 'rgba(56, 189, 248, 0.04)';
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // [3. 합격 구역 (포인트 니모)]
+                ctx.beginPath();
+                ctx.arc(cx, cy, visRe, thetaNemo - nemoHalfAngle, thetaNemo + nemoHalfAngle);
+                ctx.strokeStyle = '#10b981'; 
+                ctx.lineWidth = 6;
+                ctx.stroke();
+
+                ctx.fillStyle = '#10b981';
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText("📍 POINT NEMO", cx, cy + visRe + 18);
+
+                // [4. 위성 상태별 그리기]
+                if (simState === "IDLE") {
+                    let visR0 = getVisR(r0);
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, visR0, 0, 2 * Math.PI);
+                    ctx.strokeStyle = 'rgba(59, 130, 246, 0.2)';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+
+                    let sx = cx + visR0 * Math.cos(currentSat.burnTheta);
+                    let sy = cy + visR0 * Math.sin(currentSat.burnTheta);
+                    ctx.fillStyle = '#ef4444';
+                    ctx.beginPath(); ctx.arc(sx, sy, 4, 0, 2*Math.PI); ctx.fill();
+                    ctx.font = '10px sans-serif';
+                    ctx.fillText("감속 시작점", sx, sy - 10);
+                }
+                
+                if (simState === "ORBITING" || simState === "DEORBIT" || simState === "ATMOSPHERE") {
+                    let curR = Math.sqrt(px*px + py*py);
+                    let visCurR = getVisR(curR); // 물리 좌표를 캔버스 픽셀로 치환
+
+                    let centerTheta = Math.atan2(py, px);
+
+                    if (simState === "ATMOSPHERE") {
+                        ctx.beginPath();
+                        ctx.arc(cx, cy, visCurR, centerTheta - arcSpanAngle/2, centerTheta + arcSpanAngle/2);
+                        ctx.strokeStyle = '#ef4444';
+                        ctx.lineWidth = 4;
+                        ctx.stroke();
+                    } else {
+                        let drawPx = cx + visCurR * Math.cos(centerTheta);
+                        let drawPy = cy + visCurR * Math.sin(centerTheta);
+                        ctx.beginPath();
+                        ctx.arc(drawPx, drawPy, 5, 0, 2 * Math.PI);
+                        ctx.fillStyle = simState === "DEORBIT" ? '#f59e0b' : '#3b82f6';
+                        ctx.fill();
+                    }
+                }
+            }
+
+            // 7. 실시간 물리 업데이트
+            function updatePhysics() {
+                if (simState === "IDLE" || simState === "FINISHED") return;
+
+                let substeps = 80; 
+                let dt = 0.2; 
+
+                for (let step = 0; step < substeps; step++) {
+                    simTime += dt;
+
+                    if (simState === "ORBITING") {
+                        let omega = Math.sqrt(mu / (r0 * r0 * r0));
+                        
+                        // 구동 수명(life)을 궤도 회전 주기(바퀴 수)로 적용하여 총 궤도 체류 시간을 계산
+                        let totalOrbitTime = currentSat.life * (2 * Math.PI / omega);
+                        
+                        // 총 회전 시간을 기반으로 각도 역산: 시작 각도에서 출발하여 정확히 수명 주기만큼 돌고 burnTheta에 안착
+                        let currentTheta = currentSat.burnTheta - omega * (totalOrbitTime - simTime);
+                        
+                        px = r0 * Math.cos(currentTheta);
+                        py = r0 * Math.sin(currentTheta);
+                        vx = -v0 * Math.sin(currentTheta);
+                        vy = v0 * Math.cos(currentTheta);
+
+                        // 목표 궤도 체류 시간에 도달하면 역추진 수행
+                        if (simTime >= totalOrbitTime) {
+                            simState = "DEORBIT";
+                            deorbitTime = 0;
+                            let vMag = Math.sqrt(vx*vx + vy*vy);
+                            vx = (vx / vMag) * (vMag - dv);
+                            vy = (vy / vMag) * (vMag - dv);
+                        }
+                    } 
+                    else if (simState === "DEORBIT" || simState === "ATMOSPHERE") {
+                        let r = Math.sqrt(px*px + py*py);
+                        let h = r - Re;
+
+                        if (simState === "DEORBIT") {
+                            deorbitTime += dt;
+                            if (deorbitTime >= 3500) {
+                                simState = "FINISHED";
+                                isTimeoutFail = true;
+                                evaluateMissionResult();
+                                break;
+                            }
+                        }
+
+                        if (h <= 0) {
+                            simState = "FINISHED";
+                            isTimeoutFail = false;
+                            evaluateMissionResult();
+                            break;
+                        }
+
+                        let ga = mu / (r * r);
+                        let ax = -ga * (px / r);
+                        let ay = -ga * (py / r);
+
+                        if (h <= atmThickness) { // 고도 100km(대기권) 진입 시
+                            simState = "ATMOSPHERE";
+                            
+                            if (firstAtmosphereIn) {
+                                let vMag = Math.sqrt(vx*vx + vy*vy);
+                                let vr = (px * vx + py * vy) / r; 
+                                let sinGamma = Math.abs(vr) / vMag;
+                                if (sinGamma > 1) sinGamma = 1;
+                                
+                                entryGamma = Math.asin(sinGamma); 
+                                Lfinal = currentSat.k_break / sinGamma; 
+                                arcSpanAngle = Lfinal / Re; 
+                                firstAtmosphereIn = false;
+                            }
+
+                            let rho = 1.225 * Math.exp(-h / 7500);
+                            let vMag = Math.sqrt(vx*vx + vy*vy);
+                            let ad = 0.5 * rho * vMag * vMag * (currentSat.Cd * currentSat.A) / currentSat.m0;
+                            
+                            ax -= ad * (vx / vMag);
+                            ay -= ad * (vy / vMag);
+                        }
+
+                        vx += ax * dt;
+                        vy += ay * dt;
+                        px += vx * dt;
+                        py += vy * dt;
+                    }
+                }
+
+                updateTelemetry();
+            }
+
+            function updateTelemetry() {
+                let curR = Math.sqrt(px*px + py*py);
+                let curH = curR - Re;
+                let curV = Math.sqrt(vx*vx + vy*vy);
+
+                telePhase.innerText = simState;
+                teleAlt.innerText = curH > 0 ? (curH / 1000).toFixed(2) + " km" : "0.00 km";
+                teleSpeed.innerText = (curV).toFixed(1) + " m/s";
+                
+                if (simState === "ATMOSPHERE" || simState === "FINISHED") {
+                    teleGamma.innerText = (entryGamma * 180 / Math.PI).toFixed(2) + "°";
+                    teleLfinal.innerText = (Lfinal / 1000).toFixed(1) + " km";
+                } else {
+                    teleGamma.innerText = "-";
+                    teleLfinal.innerText = "-";
+                }
+            }
+
+            // 8. 미션 결과 평가
+            function evaluateMissionResult() {
+                resultOverlay.classList.remove('hidden');
+                setTimeout(() => {
+                    resultOverlay.classList.add('opacity-100', 'scale-100');
+                }, 50);
+
+                if (isTimeoutFail) {
+                    resultTitle.innerText = "MISSION FAIL 💥";
+                    resultTitle.className = "text-5xl font-black tracking-wider text-red-500";
+                    resultDesc.innerText = "인공위성 낙하 실패! 역추진 기동 후 일정 시간이 지났지만 낙하하지 못했습니다! 감속량(Δv)이 너무 낮아 대기권 재진입에 실패했습니다.";
+                    return;
+                }
+
+                let landingTheta = Math.atan2(py, px);
+                if (landingTheta < 0) landingTheta += 2 * Math.PI;
+
+                let angularDiff = Math.abs(landingTheta - thetaNemo);
+                if (angularDiff > Math.PI) angularDiff = 2 * Math.PI - angularDiff;
+
+                let totalArcInside = (angularDiff + arcSpanAngle/2 <= nemoHalfAngle);
+
+                if (totalArcInside) {
+                    resultTitle.innerText = "SUCCESS 🎯";
+                    resultTitle.className = "text-5xl font-black tracking-wider text-emerald-400";
+                    resultDesc.innerText = `인공위성 낙하 성공! ${currentSat.name}의 파편 (${(Lfinal/1000).toFixed(0)}km)이 모두 포인트 니모 범위 안에 들어갔습니다.`;
+                } else {
+                    resultTitle.innerText = "MISSION FAIL 💥";
+                    resultTitle.className = "text-5xl font-black tracking-wider text-red-500";
+                    resultDesc.innerText = `인공위성 낙하 실패! 대기권에 진입했으나 파편이 포인트 니모 범위를 벗어났습니다. 감속량(Δv)을 조절해 보세요.`;
+                }
+            }
+
+            // 9. 인터페이스 제어
+            function startSimulation() {
+                if (simState !== "IDLE") return;
+                
+                simState = "ORBITING";
+                simTime = 0;
+                deorbitTime = 0;
+                firstAtmosphereIn = true;
+                isTimeoutFail = false;
+                satSelect.disabled = true;
+                dvInput.disabled = true;
+                startBtn.disabled = true;
+                startBtn.className = "flex-1 bg-gray-700 text-gray-400 font-bold py-3 px-4 rounded-lg cursor-not-allowed";
+            }
+
+            function resetSimulation() {
+                simState = "IDLE";
+                simTime = 0;
+                deorbitTime = 0;
+                px = 0; py = 0; vx = 0; vy = 0;
+                entryGamma = 0; Lfinal = 0; arcSpanAngle = 0;
+                firstAtmosphereIn = true;
+                isTimeoutFail = false;
+                
+                satSelect.disabled = false;
+                dvInput.disabled = false;
+                startBtn.disabled = false;
+                startBtn.className = "flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-lg transition active:scale-95 cursor-pointer";
+                
+                resultOverlay.classList.remove('opacity-100', 'scale-100');
+                setTimeout(() => { resultOverlay.classList.add('hidden'); }, 300);
+                
+                updateSpecs();
+                updateTelemetry();
+            }
+
+            startBtn.addEventListener('click', startSimulation);
+            resetBtn.addEventListener('click', resetSimulation);
+            overlayResetBtn.addEventListener('click', resetSimulation);
+
+            // 초기 실행
+            updateSpecs();
+            function mainLoop() {
+                updatePhysics();
+                drawScene();
+                requestAnimationFrame(mainLoop);
+            }
+            requestAnimationFrame(mainLoop);
+
+        });
+    </script>
+</body>
+</html>
